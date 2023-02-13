@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+	"go.elastic.co/apm/v2/model"
 )
 
 var (
@@ -70,15 +72,17 @@ type Batch struct {
 	// invoke lifecycle then it is possible to receive the agent init request
 	// before extension invoke is registered.
 	currentlyExecutingRequestID string
+	coldstartDurationMs         float32
 }
 
 // NewBatch creates a new BatchData which can accept a
 // maximum number of entries as specified by the arguments.
 func NewBatch(maxSize int, maxAge time.Duration) *Batch {
 	return &Batch{
-		invocations: make(map[string]*Invocation),
-		maxSize:     maxSize,
-		maxAge:      maxAge,
+		invocations:         make(map[string]*Invocation),
+		maxSize:             maxSize,
+		maxAge:              maxAge,
+		coldstartDurationMs: -1.0,
 	}
 }
 
@@ -167,13 +171,14 @@ func (b *Batch) AddAgentData(apmData APMData) error {
 	}
 	for {
 		data, after, _ = bytes.Cut(after, newLineSep)
-		if inc.NeedProxyTransaction() && isTransactionEvent(data) {
+		isTx := isTransactionEvent(data)
+		if inc.NeedProxyTransaction() && isTx {
 			res := gjson.GetBytes(data, "transaction.id")
 			if res.Str != "" && inc.TransactionID == res.Str {
 				inc.TransactionObserved = true
 			}
 		}
-		if err := b.addData(data); err != nil {
+		if err := b.addData(data, isTx); err != nil {
 			return err
 		}
 		if len(after) == 0 {
@@ -207,6 +212,12 @@ func (b *Batch) OnPlatformReport(reqID string) (string, int64, time.Time, error)
 	return inc.FunctionARN, inc.DeadlineMs, inc.Timestamp, nil
 }
 
+func (b *Batch) OnPlatformInitReport(reqID string, initDurationMs float32) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.coldstartDurationMs = initDurationMs
+}
+
 // OnShutdown flushes the data for shipping to APM Server by finalizing all
 // the invocation in the batch. If we haven't received a platform.runtimeDone
 // event for an invocation so far we won't be able to recieve it in time thus
@@ -236,7 +247,7 @@ func (b *Batch) AddLambdaData(d []byte) error {
 	if b.count >= b.maxSize {
 		return ErrBatchFull
 	}
-	return b.addData(d)
+	return b.addData(d, false)
 }
 
 // Count return the number of APMData entries in batch.
@@ -284,7 +295,7 @@ func (b *Batch) finalizeInvocation(reqID, status string, time time.Time) error {
 	if err != nil {
 		return err
 	}
-	err = b.addData(proxyTxn)
+	err = b.addData(proxyTxn, true)
 	if err != nil {
 		return err
 	}
@@ -292,12 +303,20 @@ func (b *Batch) finalizeInvocation(reqID, status string, time time.Time) error {
 	return nil
 }
 
-func (b *Batch) addData(data []byte) error {
+func (b *Batch) addData(data []byte, isTx bool) error {
 	if len(data) == 0 {
 		return nil
 	}
 	if b.metadataBytes == 0 {
 		return ErrMetadataUnavailable
+	}
+	if isTx && b.coldstartDurationMs >= 0 {
+		newData, err := b.modelInitPhase(data)
+		if err != nil {
+			return err
+		}
+		data = newData
+
 	}
 	if err := b.buf.WriteByte('\n'); err != nil {
 		return err
@@ -311,6 +330,69 @@ func (b *Batch) addData(data []byte) error {
 	}
 	b.count++
 	return nil
+}
+
+func (b *Batch) modelInitPhase(txData []byte) ([]byte, error) {
+	initDurationMs := b.coldstartDurationMs
+	tx, startTime, err := adjustTimestamp(txData, initDurationMs)
+	if err != nil {
+		return nil, err
+	}
+	b.coldstartDurationMs = -1.0
+	fmt.Printf("## Creating Span for init phase")
+	txID := &model.SpanID{}
+	txIDStr := fmt.Sprintf(`"%s"`, gjson.GetBytes(txData, "transaction.id").String())
+	fmt.Println("##")
+	fmt.Printf("## TransactionID String: %s", txIDStr)
+	txID.UnmarshalJSON([]byte(txIDStr))
+	traceId := &model.TraceID{}
+	traceIdStr := fmt.Sprintf(`"%s"`, gjson.GetBytes(txData, "transaction.trace_id").String())
+	traceId.UnmarshalJSON([]byte(traceIdStr))
+	initSpan, err := NewInitSpan(*txID, *traceId, startTime, initDurationMs)
+	if err != nil {
+		return nil, err
+	}
+
+	initSpanData, err := initSpan.GetBytes()
+	if err != nil {
+		return nil, err
+	}
+
+	debugData := string(initSpanData[:])
+	fmt.Printf("## Init Span data: %s", debugData)
+
+	b.addData(initSpanData, false)
+
+	return tx, nil
+}
+
+func adjustTimestamp(txData []byte, initDurationMs float32) ([]byte, int64, error) {
+	fmt.Printf("## adjusting timepstamp for request")
+
+	oldTimestamp := gjson.GetBytes(txData, "transaction.timestamp").Int()
+	newTime := oldTimestamp - int64(initDurationMs*1000.0)
+	oldDuration := float32(gjson.GetBytes(txData, "transaction.duration").Float())
+	newDuration := oldDuration + initDurationMs
+
+	fmt.Printf("## old timestamp: %d", oldTimestamp)
+	fmt.Printf("## setting new transaction timestamp: %d", newTime)
+
+	txn, err := sjson.SetBytes(txData, "transaction.timestamp", newTime)
+	if err != nil {
+		return nil, 0.0, err
+	}
+
+	txn, err = sjson.SetBytes(txn, "transaction.duration", newDuration)
+	if err != nil {
+		return nil, 0.0, err
+	}
+
+	txn, err = sjson.SetBytes(txn, "transaction.context.tags.aws_lambda_init_duration", initDurationMs)
+	if err != nil {
+		return nil, 0.0, err
+	}
+
+	return txn, newTime, nil
 }
 
 func isTransactionEvent(body []byte) bool {

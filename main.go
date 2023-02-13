@@ -60,7 +60,7 @@ func main() {
 	}
 
 	if captureLogs {
-		appConfigs = append(appConfigs, app.WithFunctionLogSubscription())
+		appConfigs = append(appConfigs, app.WithFunctionTelemetrySubscription())
 	}
 
 	app, err := app.New(ctx, appConfigs...)

@@ -36,7 +36,7 @@ import (
 	e2eTesting "github.com/elastic/apm-aws-lambda/e2e-testing"
 	"github.com/elastic/apm-aws-lambda/extension"
 	"github.com/elastic/apm-aws-lambda/logger"
-	"github.com/elastic/apm-aws-lambda/logsapi"
+	"github.com/elastic/apm-aws-lambda/telemetryapi"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -158,17 +158,17 @@ func newMockApmServer(t *testing.T, l *zap.SugaredLogger) (*MockServerInternals,
 	return &apmServerInternals, apmServer
 }
 
-func newMockLambdaServer(t *testing.T, logsapiAddr string, eventsChannel chan MockEvent, l *zap.SugaredLogger) *MockServerInternals {
+func newMockLambdaServer(t *testing.T, telemetryapiAddr string, eventsChannel chan MockEvent, l *zap.SugaredLogger) *MockServerInternals {
 	var lambdaServerInternals MockServerInternals
 	// A big queue that can hold all the events required for a test
-	mockLogEventQ := make(chan logsapi.LogEvent, 100)
+	mockTelEventQ := make(chan telemetryapi.TelEvent, 100)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		startLogSender(ctx, mockLogEventQ, logsapiAddr, l)
+		startLogSender(ctx, mockTelEventQ, telemetryapiAddr, l)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -194,7 +194,7 @@ func newMockLambdaServer(t *testing.T, logsapiAddr string, eventsChannel chan Mo
 			select {
 			case nextEvent := <-eventsChannel:
 				sendNextEventInfo(w, currID, nextEvent.Timeout, nextEvent.Type == Shutdown, l)
-				go processMockEvent(mockLogEventQ, currID, nextEvent, os.Getenv("ELASTIC_APM_DATA_RECEIVER_SERVER_PORT"), &lambdaServerInternals, l)
+				go processMockEvent(mockTelEventQ, currID, nextEvent, os.Getenv("ELASTIC_APM_DATA_RECEIVER_SERVER_PORT"), &lambdaServerInternals, l)
 			default:
 				finalShutDown := MockEvent{
 					Type:              Shutdown,
@@ -202,7 +202,7 @@ func newMockLambdaServer(t *testing.T, logsapiAddr string, eventsChannel chan Mo
 					Timeout:           0,
 				}
 				sendNextEventInfo(w, currID, finalShutDown.Timeout, true, l)
-				go processMockEvent(mockLogEventQ, currID, finalShutDown, os.Getenv("ELASTIC_APM_DATA_RECEIVER_SERVER_PORT"), &lambdaServerInternals, l)
+				go processMockEvent(mockTelEventQ, currID, finalShutDown, os.Getenv("ELASTIC_APM_DATA_RECEIVER_SERVER_PORT"), &lambdaServerInternals, l)
 			}
 		// Logs API subscription request
 		case "/2020-08-15/logs":
@@ -232,8 +232,8 @@ func newTestStructs(t *testing.T) chan MockEvent {
 	return eventsChannel
 }
 
-func processMockEvent(q chan<- logsapi.LogEvent, currID string, event MockEvent, extensionPort string, internals *MockServerInternals, l *zap.SugaredLogger) {
-	queueLogEvent(q, currID, logsapi.PlatformStart, l)
+func processMockEvent(q chan<- telemetryapi.TelEvent, currID string, event MockEvent, extensionPort string, internals *MockServerInternals, l *zap.SugaredLogger) {
+	queueTelEvent(q, currID, telemetryapi.PlatformStart, l)
 	client := http.Client{}
 
 	// Use a custom transport with a low timeout
@@ -325,10 +325,10 @@ func processMockEvent(q chan<- logsapi.LogEvent, currID string, event MockEvent,
 	case Shutdown:
 	}
 	if sendRuntimeDone {
-		queueLogEvent(q, currID, logsapi.PlatformRuntimeDone, l)
+		queueTelEvent(q, currID, telemetryapi.PlatformRuntimeDone, l)
 	}
 	if sendMetrics {
-		queueLogEvent(q, currID, logsapi.PlatformReport, l)
+		queueTelEvent(q, currID, telemetryapi.PlatformReport, l)
 	}
 }
 
@@ -349,12 +349,12 @@ func sendNextEventInfo(w http.ResponseWriter, id string, timeoutSec float64, shu
 	}
 }
 
-func queueLogEvent(q chan<- logsapi.LogEvent, requestID string, logEventType logsapi.LogEventType, l *zap.SugaredLogger) {
-	record := logsapi.LogEventRecord{
+func queueTelEvent(q chan<- telemetryapi.TelEvent, requestID string, logEventType telemetryapi.TelEventType, l *zap.SugaredLogger) {
+	record := telemetryapi.TelEventRecord{
 		RequestID: requestID,
 	}
-	if logEventType == logsapi.PlatformReport {
-		record.Metrics = logsapi.PlatformMetrics{
+	if logEventType == telemetryapi.PlatformReport {
+		record.Metrics = telemetryapi.PlatformMetrics{
 			BilledDurationMs: 60,
 			DurationMs:       59.9,
 			MemorySizeMB:     128,
@@ -363,7 +363,7 @@ func queueLogEvent(q chan<- logsapi.LogEvent, requestID string, logEventType log
 		}
 	}
 
-	logEvent := logsapi.LogEvent{
+	logEvent := telemetryapi.TelEvent{
 		Time:   time.Now(),
 		Type:   logEventType,
 		Record: record,
@@ -378,17 +378,17 @@ func queueLogEvent(q chan<- logsapi.LogEvent, requestID string, logEventType log
 	q <- logEvent
 }
 
-func startLogSender(ctx context.Context, q <-chan logsapi.LogEvent, logsapiAddr string, l *zap.SugaredLogger) {
+func startLogSender(ctx context.Context, q <-chan telemetryapi.TelEvent, telemetryapiAddr string, l *zap.SugaredLogger) {
 	client := http.Client{
 		Timeout: 10 * time.Millisecond,
 	}
-	doSend := func(events []logsapi.LogEvent) error {
+	doSend := func(events []telemetryapi.TelEvent) error {
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(events); err != nil {
 			return err
 		}
 
-		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s", logsapiAddr), &buf)
+		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s", telemetryapiAddr), &buf)
 		if err != nil {
 			return err
 		}
@@ -403,7 +403,7 @@ func startLogSender(ctx context.Context, q <-chan logsapi.LogEvent, logsapiAddr 
 		return nil
 	}
 
-	var batch []logsapi.LogEvent
+	var batch []telemetryapi.TelEvent
 	flushInterval := time.NewTicker(100 * time.Millisecond)
 	defer flushInterval.Stop()
 	for {
@@ -447,15 +447,15 @@ func TestStandardEventsChain(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeStandard, APMServerBehavior: TimelyResponse, ExecutionDuration: 1, Timeout: 5},
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.Contains(t, apmServerInternals.Data, TimelyResponse)
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for app to finish")
@@ -469,15 +469,15 @@ func TestFlush(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeStandardFlush, APMServerBehavior: TimelyResponse, ExecutionDuration: 1, Timeout: 5},
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.Contains(t, apmServerInternals.Data, TimelyResponse)
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for app to finish")
@@ -492,8 +492,8 @@ func TestLateFlush(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeLateFlush, APMServerBehavior: TimelyResponse, ExecutionDuration: 0, Timeout: 5},
@@ -501,7 +501,7 @@ func TestLateFlush(t *testing.T) {
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.Regexp(
 			t,
 			regexp.MustCompile(fmt.Sprintf(".*\n%s.*\n%s", TimelyResponse, TimelyResponse)), // metadata followed by TimelyResponsex2
@@ -519,15 +519,15 @@ func TestWaitGroup(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeWaitgroupsRace, APMServerBehavior: TimelyResponse, ExecutionDuration: 1, Timeout: 500},
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.Contains(t, apmServerInternals.Data, TimelyResponse)
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for app to finish")
@@ -541,8 +541,8 @@ func TestAPMServerDown(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, apmServer := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	apmServer.Close()
 	eventsChain := []MockEvent{
@@ -550,7 +550,7 @@ func TestAPMServerDown(t *testing.T) {
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.NotContains(t, apmServerInternals.Data, TimelyResponse)
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for app to finish")
@@ -564,15 +564,15 @@ func TestAPMServerHangs(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeStandard, APMServerBehavior: Hangs, ExecutionDuration: 1, Timeout: 500},
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.NotContains(t, apmServerInternals.Data, Hangs)
 		apmServerInternals.UnlockSignalChannel <- struct{}{}
 	case <-time.After(timeout):
@@ -589,8 +589,8 @@ func TestAPMServerRecovery(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	t.Setenv("ELASTIC_APM_DATA_FORWARDER_TIMEOUT", "1s")
 
@@ -607,7 +607,7 @@ func TestAPMServerRecovery(t *testing.T) {
 		apmServerInternals.UnlockSignalChannel <- struct{}{}
 	}()
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		// Make sure mock APM Server processes the Hangs request
 		wg.Wait()
 		time.Sleep(10 * time.Millisecond)
@@ -627,15 +627,15 @@ func TestGracePeriodHangs(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeStandard, APMServerBehavior: Hangs, ExecutionDuration: 1, Timeout: 500},
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		time.Sleep(100 * time.Millisecond)
 		apmServerInternals.UnlockSignalChannel <- struct{}{}
 	case <-time.After(timeout):
@@ -652,15 +652,15 @@ func TestAPMServerCrashesDuringExecution(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeStandard, APMServerBehavior: Crashes, ExecutionDuration: 1, Timeout: 5},
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.NotContains(t, apmServerInternals.Data, Crashes)
 	case <-time.After(10 * time.Second):
 		t.Fatalf("timed out waiting for app to finish")
@@ -675,8 +675,8 @@ func TestFullChannel(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	// Use a smaller buffer size to make it easier to reproduce
 	t.Setenv("ELASTIC_APM_LAMBDA_AGENT_DATA_BUFFER_SIZE", "1")
@@ -686,7 +686,7 @@ func TestFullChannel(t *testing.T) {
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.Contains(t, apmServerInternals.Data, TimelyResponse)
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for app to finish")
@@ -701,8 +701,8 @@ func TestFullChannelSlowAPMServer(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	t.Setenv("ELASTIC_APM_SEND_STRATEGY", "background")
 	// Use a smaller buffer size to make it easier to reproduce
@@ -713,7 +713,7 @@ func TestFullChannelSlowAPMServer(t *testing.T) {
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		// The test should not hang
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for app to finish")
@@ -727,15 +727,15 @@ func TestInfoRequest(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	lambdaServerInternals := newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	lambdaServerInternals := newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeStandardInfo, APMServerBehavior: TimelyResponse, ExecutionDuration: 1, Timeout: 5},
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.Contains(t, lambdaServerInternals.Data, "7814d524d3602e70b703539c57568cba6964fc20")
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for app to finish")
@@ -749,15 +749,15 @@ func TestInfoRequestHangs(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	lambdaServerInternals := newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	lambdaServerInternals := newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeStandardInfo, APMServerBehavior: Hangs, ExecutionDuration: 1, Timeout: 5},
 	}
 	eventQueueGenerator(eventsChain, eventsChannel)
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		time.Sleep(2 * time.Second)
 		assert.NotContains(t, lambdaServerInternals.Data, "7814d524d3602e70b703539c57568cba6964fc20")
 		apmServerInternals.UnlockSignalChannel <- struct{}{}
@@ -773,8 +773,8 @@ func TestMetrics(t *testing.T) {
 
 	eventsChannel := newTestStructs(t)
 	apmServerInternals, _ := newMockApmServer(t, l)
-	logsapiAddr := randomAddr()
-	newMockLambdaServer(t, logsapiAddr, eventsChannel, l)
+	telemetryapiAddr := randomAddr()
+	newMockLambdaServer(t, telemetryapiAddr, eventsChannel, l)
 
 	eventsChain := []MockEvent{
 		{Type: InvokeStandard, APMServerBehavior: TimelyResponse, ExecutionDuration: 1, Timeout: 5},
@@ -783,7 +783,7 @@ func TestMetrics(t *testing.T) {
 	eventQueueGenerator(eventsChain, eventsChannel)
 
 	select {
-	case <-runApp(t, logsapiAddr):
+	case <-runApp(t, telemetryapiAddr):
 		assert.Contains(t, apmServerInternals.Data, `{"metadata":{"service":{"name":"1234_service-12a3","version":"5.1.3","environment":"staging","agent":{"name":"elastic-node","version":"3.14.0"},"framework":{"name":"Express","version":"1.2.3"},"language":{"name":"ecmascript","version":"8"},"runtime":{"name":"node","version":"8.0.0"},"node":{"configured_name":"node-123"}},"user":{"username":"bar","id":"123user","email":"bar@user.com"},"labels":{"tag0":null,"tag1":"one","tag2":2},"process":{"pid":1234,"ppid":6789,"title":"node","argv":["node","server.js"]},"system":{"architecture":"x64","hostname":"prod1.example.com","platform":"darwin","container":{"id":"container-id"},"kubernetes":{"namespace":"namespace1","node":{"name":"node-name"},"pod":{"name":"pod-name","uid":"pod-uid"}}},"cloud":{"provider":"cloud_provider","region":"cloud_region","availability_zone":"cloud_availability_zone","instance":{"id":"instance_id","name":"instance_name"},"machine":{"type":"machine_type"},"account":{"id":"account_id","name":"account_name"},"project":{"id":"project_id","name":"project_name"},"service":{"name":"lambda"}}}}`)
 		assert.Contains(t, apmServerInternals.Data, `faas.billed_duration":{"value":60`)
 		assert.Contains(t, apmServerInternals.Data, `faas.duration":{"value":59.9`)
@@ -797,13 +797,13 @@ func TestMetrics(t *testing.T) {
 	}
 }
 
-func runApp(t *testing.T, logsapiAddr string) <-chan struct{} {
+func runApp(t *testing.T, telemetryapiAddr string) <-chan struct{} {
 	ctx, cancel := context.WithCancel(context.Background())
 	app, err := app.New(ctx,
 		app.WithExtensionName("apm-lambda-extension"),
 		app.WithLambdaRuntimeAPI(os.Getenv("AWS_LAMBDA_RUNTIME_API")),
 		app.WithLogLevel("debug"),
-		app.WithLogsapiAddress(logsapiAddr),
+		app.WithTelemetryapiAddress(telemetryapiAddr),
 	)
 	require.NoError(t, err)
 

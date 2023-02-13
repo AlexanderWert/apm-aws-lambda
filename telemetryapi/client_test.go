@@ -20,11 +20,12 @@ package telemetryapi_test
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/elastic/apm-aws-lambda/telemetryapi"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+
+	"github.com/elastic/apm-aws-lambda/telemetryapi"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
@@ -40,20 +41,20 @@ func TestClient(t *testing.T) {
 		},
 		"missing base url": {
 			opts: []telemetryapi.ClientOption{
-				telemetryapi.WithTelAPIBaseURL(""),
+				telemetryapi.WithTelemetryAPIBaseURL(""),
 				telemetryapi.WithLogger(zaptest.NewLogger(t).Sugar()),
 			},
 			expectedErr: true,
 		},
 		"missing logger": {
 			opts: []telemetryapi.ClientOption{
-				telemetryapi.WithTelAPIBaseURL("http://example.com"),
+				telemetryapi.WithTelemetryAPIBaseURL("http://example.com"),
 			},
 			expectedErr: true,
 		},
 		"valid": {
 			opts: []telemetryapi.ClientOption{
-				telemetryapi.WithTelAPIBaseURL("http://example.com"),
+				telemetryapi.WithTelemetryAPIBaseURL("http://example.com"),
 				telemetryapi.WithLogger(zaptest.NewLogger(t).Sugar()),
 			},
 		},
@@ -103,7 +104,7 @@ func TestSubscribe(t *testing.T) {
 			}))
 			defer s.Close()
 
-			cOpts := append(tc.opts, telemetryapi.WithTelAPIBaseURL(s.URL), telemetryapi.WithSubscriptionTypes(telemetryapi.Platform))
+			cOpts := append(tc.opts, telemetryapi.WithTelemetryAPIBaseURL(s.URL), telemetryapi.WithSubscriptionTypes(telemetryapi.Platform))
 			c, err := telemetryapi.NewClient(cOpts...)
 			require.NoError(t, err)
 
@@ -144,7 +145,7 @@ func TestSubscribeAWSRequest(t *testing.T) {
 
 			cOpts := append(
 				tc.opts,
-				telemetryapi.WithTelAPIBaseURL(s.URL),
+				telemetryapi.WithTelemetryAPIBaseURL(s.URL),
 				telemetryapi.WithLogBuffer(1),
 				telemetryapi.WithSubscriptionTypes(telemetryapi.Platform, telemetryapi.Function),
 			)

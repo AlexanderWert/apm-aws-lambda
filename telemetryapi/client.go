@@ -47,7 +47,11 @@ const (
 type ClientOption func(*Client)
 
 type invocationLifecycler interface {
+	OnPlatformInitReport(reqID string, initDurationMs float32)
 	OnLambdaLogRuntimeDone(requestID, status string, time time.Time) error
+	OnPlatformReport(reqID string) (fnARN string, deadlineMs int64, ts time.Time, err error)
+	// Size should return the number of invocations waiting on platform.report
+	Size() int
 }
 
 // Client is the client used to subscribe to the Telemetry API.

@@ -63,17 +63,17 @@ func (app *App) Run(ctx context.Context) error {
 		app.apmClient.FlushAPMData(ctx)
 	}()
 
-	if app.logsClient != nil {
-		if err := app.logsClient.StartService(app.extensionClient.ExtensionID); err != nil {
-			app.logger.Warnf("Error while subscribing to the Logs API: %v", err)
+	if app.telemetryClient != nil {
+		if err := app.telemetryClient.StartService(app.extensionClient.ExtensionID); err != nil {
+			app.logger.Warnf("Error while subscribing to the Telemetry API: %v", err)
 
-			// disable logs API if the service failed to start
-			app.logsClient = nil
+			// disable telemetry API if the service failed to start
+			app.telemetryClient = nil
 		} else {
-			// Remember to shutdown the log service if available.
+			// Remember to shutdown the telemetry service if available.
 			defer func() {
-				if err := app.logsClient.Shutdown(); err != nil {
-					app.logger.Warnf("failed to shutdown the log service: %v", err)
+				if err := app.telemetryClient.Shutdown(); err != nil {
+					app.logger.Warnf("failed to shutdown the telemetry service: %v", err)
 				}
 			}()
 		}
@@ -169,11 +169,11 @@ func (app *App) processEvent(
 		}()
 
 		// platform.report metric (and some other metrics) might not have been
-		// reported by the logs API even till shutdown. At shutdown we will make
+		// reported by the telemetry API even till shutdown. At shutdown we will make
 		// a last attempt to collect and report these metrics. However, it is
 		// also possible that lambda has init a few execution env preemptively,
 		// for such cases the extension will see only a SHUTDOWN event and
-		// there is no need to wait for any log event.
+		// there is no need to wait for any telemetry event.
 		if app.batch.Size() == 0 {
 			return event, nil
 		}
@@ -188,13 +188,13 @@ func (app *App) processEvent(
 		}
 	}()
 
-	// Lambda Service Logs Processing, also used to extract metrics from APM logs
+	// Lambda Service Telemetry Processing, also used to extract metrics from APM logs
 	// This goroutine should not be started if subscription failed
-	logProcessingDone := make(chan struct{})
-	if app.logsClient != nil {
+	telProcessingDone := make(chan struct{})
+	if app.telemetryClient != nil {
 		go func() {
-			defer close(logProcessingDone)
-			app.logsClient.ProcessLogs(
+			defer close(telProcessingDone)
+			app.telemetryClient.ProcessEvents(
 				invocationCtx,
 				event.RequestID,
 				event.InvokedFunctionArn,
@@ -203,8 +203,8 @@ func (app *App) processEvent(
 			)
 		}()
 	} else {
-		app.logger.Warn("Logs collection not started due to earlier subscription failure")
-		close(logProcessingDone)
+		app.logger.Warn("Telemetry collection not started due to earlier subscription failure")
+		close(telProcessingDone)
 	}
 
 	// Calculate how long to wait for a runtimeDoneSignal or AgentDoneSignal signal
@@ -219,17 +219,17 @@ func (app *App) processEvent(
 	// between the end of the execution of the lambda function and the end of the
 	// execution of processEvent():
 	// 1) AgentDoneSignal triggered upon reception of a `flushed=true` query from the agent
-	// 2) [Backup 1] All expected log events are processed.
+	// 2) [Backup 1] All expected telemetry events are processed.
 	// 3) [Backup 2] If all else fails, the extension relies of the timeout of the Lambda
 	// function to interrupt itself 200ms before the specified deadline to give the extension
 	// time to flush data before shutdown.
 	select {
 	case <-app.apmClient.WaitForFlush():
 		app.logger.Debug("APM client has sent flush signal")
-	case <-logProcessingDone:
+	case <-telProcessingDone:
 		app.logger.Debug("Received runtimeDone signal")
 	case <-timer.C:
-		app.logger.Info("Time expired while waiting for agent done signal or final log event")
+		app.logger.Info("Time expired while waiting for agent done signal or final telemetry event")
 	}
 	return event, nil
 }

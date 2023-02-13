@@ -29,8 +29,8 @@ func WithListenerAddress(s string) ClientOption {
 	}
 }
 
-// WithTelAPIBaseURL sets the telemetry api base url.
-func WithTelAPIBaseURL(s string) ClientOption {
+// WithTelemetryAPIBaseURL sets the telemetry api base url.
+func WithTelemetryAPIBaseURL(s string) ClientOption {
 	return func(c *Client) {
 		c.telAPIBaseURL = s
 	}

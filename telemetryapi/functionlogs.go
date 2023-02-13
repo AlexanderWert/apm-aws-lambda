@@ -22,17 +22,17 @@ import (
 	"go.elastic.co/fastjson"
 )
 
-type telemetryContainer struct {
-	Telemetry *telemetryLine
+type logContainer struct {
+	Log *logLine
 }
 
-type telemetryLine struct {
+type logLine struct {
 	Timestamp model.Time
 	Message   string
 	FAAS      *faas
 }
 
-func (t *telemetryLine) MarshalFastJSON(w *fastjson.Writer) error {
+func (t *logLine) MarshalFastJSON(w *fastjson.Writer) error {
 	var firstErr error
 	w.RawString("{\"message\":")
 	w.String(t.Message)
@@ -73,9 +73,9 @@ func (f *faas) MarshalFastJSON(w *fastjson.Writer) error {
 	return nil
 }
 
-func (tc telemetryContainer) MarshalFastJSON(json *fastjson.Writer) error {
-	json.RawString(`{"telemetry":`)
-	if err := tc.Telemetry.MarshalFastJSON(json); err != nil {
+func (lc logContainer) MarshalFastJSON(json *fastjson.Writer) error {
+	json.RawString(`{"log":`)
+	if err := lc.Log.MarshalFastJSON(json); err != nil {
 		return err
 	}
 	json.RawByte('}')
@@ -85,25 +85,25 @@ func (tc telemetryContainer) MarshalFastJSON(json *fastjson.Writer) error {
 // ProcessFunctionTelemetry processes the `function` telemetry line from Telemetry API and returns
 // a byte array containing the JSON body for the extracted telemetry along with the timestamp.
 // A non nil error is returned when marshaling of the event into JSON fails.
-func ProcessFunctionTelemetry(
+func ProcessFunctionLog(
 	requestID string,
 	invokedFnArn string,
 	telemetry TelEvent,
 ) ([]byte, error) {
-	tc := telemetryContainer{
-		Telemetry: &telemetryLine{
+	lc := logContainer{
+		Log: &logLine{
 			Timestamp: model.Time(telemetry.Time),
 			Message:   telemetry.StringRecord,
 		},
 	}
 
-	tc.Telemetry.FAAS = &faas{
+	lc.Log.FAAS = &faas{
 		ID:        invokedFnArn,
 		Execution: requestID,
 	}
 
 	var jsonWriter fastjson.Writer
-	if err := tc.MarshalFastJSON(&jsonWriter); err != nil {
+	if err := lc.MarshalFastJSON(&jsonWriter); err != nil {
 		return nil, err
 	}
 

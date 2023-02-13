@@ -22,13 +22,13 @@ import (
 )
 
 type appConfig struct {
-	awsLambdaRuntimeAPI           string
-	awsConfig                     aws.Config
-	extensionName                 string
-	disableLogsAPI                bool
-	enableFunctionLogSubscription bool
-	logLevel                      string
-	logsapiAddr                   string
+	awsLambdaRuntimeAPI                 string
+	awsConfig                           aws.Config
+	extensionName                       string
+	disableTelemetryAPI                 bool
+	enableFunctionTelemetrySubscription bool
+	logLevel                            string
+	telemetryapiAddr                    string
 }
 
 // ConfigOption is used to configure the lambda extension
@@ -50,19 +50,19 @@ func WithExtensionName(name string) ConfigOption {
 	}
 }
 
-// WithoutLogsAPI disables the logs api.
-func WithoutLogsAPI() ConfigOption {
+// WithoutTelemetryAPI disables the telemetry api.
+func WithoutTelemetryAPI() ConfigOption {
 	return func(c *appConfig) {
-		c.disableLogsAPI = true
+		c.disableTelemetryAPI = true
 	}
 }
 
-// WithFunctionLogSubscription enables the logs api subscription
-// to function log stream. This option will only work if LogsAPI
-// is not disabled by the WithoutLogsAPI config option.
-func WithFunctionLogSubscription() ConfigOption {
+// WithFunctionTelemetrySubscription enables the telemetry api subscription
+// to function log stream. This option will only work if TelemetryAPI
+// is not disabled by the WithoutTelemetryAPI config option.
+func WithFunctionTelemetrySubscription() ConfigOption {
 	return func(c *appConfig) {
-		c.enableFunctionLogSubscription = true
+		c.enableFunctionTelemetrySubscription = true
 	}
 }
 
@@ -73,11 +73,11 @@ func WithLogLevel(level string) ConfigOption {
 	}
 }
 
-// WithLogsapiAddress sets the listener address of the
-// server listening for logs event.
-func WithLogsapiAddress(s string) ConfigOption {
+// WithTelemetryapiAddress sets the listener address of the
+// server listening for telemetry event.
+func WithTelemetryapiAddress(s string) ConfigOption {
 	return func(c *appConfig) {
-		c.logsapiAddr = s
+		c.telemetryapiAddr = s
 	}
 }
 

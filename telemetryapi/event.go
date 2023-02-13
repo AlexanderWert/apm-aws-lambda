@@ -20,8 +20,6 @@ package telemetryapi
 import (
 	"context"
 	"time"
-
-	"github.com/elastic/apm-aws-lambda/extension"
 )
 
 // TelEventType represents the log type that is received in the log messages
@@ -70,7 +68,6 @@ func (tc *Client) ProcessEvents(
 	requestID string,
 	invokedFnArn string,
 	dataChan chan []byte,
-	prevEvent *extension.NextEventResponse,
 	isShutdown bool,
 ) {
 	// platformStartReqID is to identify the requestID for the function
@@ -82,6 +79,9 @@ func (tc *Client) ProcessEvents(
 		case telEvent := <-tc.telChannel:
 			tc.logger.Debugf("Received telemetry event %v for request ID %s", telEvent.Type, telEvent.Record.RequestID)
 			switch telEvent.Type {
+			case PlatformInitReport:
+				tc.invocationLifecycler.OnPlatformInitReport(telEvent.Record.RequestID, telEvent.Record.Metrics.DurationMs)
+				tc.logger.Infof("## PlatformInitReport processed successfully!")
 			case PlatformStart:
 				platformStartReqID = telEvent.Record.RequestID
 			case PlatformRuntimeDone:
@@ -101,10 +101,12 @@ func (tc *Client) ProcessEvents(
 					return
 				}
 			case PlatformReport:
-				// TODO: @lahsivjar Refactor usage of prevEvent.RequestID (should now query the batch?)
-				if prevEvent != nil && telEvent.Record.RequestID == prevEvent.RequestID {
+				fnARN, deadlineMs, ts, err := tc.invocationLifecycler.OnPlatformReport(telEvent.Record.RequestID)
+				if err != nil {
+					tc.logger.Warnf("Failed to process platform report: %v", err)
+				} else {
 					tc.logger.Debugf("Received platform report for %s", telEvent.Record.RequestID)
-					processedMetrics, err := ProcessPlatformReport(prevEvent, telEvent)
+					processedMetrics, err := ProcessPlatformReport(fnARN, deadlineMs, ts, telEvent)
 					if err != nil {
 						tc.logger.Errorf("Error processing Lambda platform metrics: %v", err)
 					} else {
@@ -113,28 +115,27 @@ func (tc *Client) ProcessEvents(
 						case <-ctx.Done():
 						}
 					}
-					// For shutdown event the platform report metrics for the previous log event
-					// would be the last possible log event.
-					if isShutdown {
-						tc.logger.Debugf(
-							"Processed platform report event for reqID %s as the last log event before shutdown",
-							telEvent.Record.RequestID,
-						)
-						return
-					}
-				} else {
-					tc.logger.Warn("Report event request id didn't match the previous event id")
+				}
+				// For shutdown event the platform report metrics for the previous log event
+				// would be the last possible log event. After processing this metric the
+				// invocation lifecycler's cache should be empty.
+				if isShutdown && tc.invocationLifecycler.Size() == 0 {
+					tc.logger.Debugf(
+						"Processed platform report event for reqID %s as the last log event before shutdown",
+						telEvent.Record.RequestID,
+					)
+					return
 				}
 			case PlatformLogsDropped:
 				tc.logger.Warnf("Telemetry events dropped due to extension falling behind: %v", telEvent.Record)
 			case FunctionLog:
-				processedEvent, err := ProcessFunctionTelemetry(
+				processedEvent, err := ProcessFunctionLog(
 					platformStartReqID,
 					invokedFnArn,
 					telEvent,
 				)
 				if err != nil {
-					tc.logger.Warnf("Error processing function event : %v", err)
+					tc.logger.Warnf("Error processing function log : %v", err)
 				} else {
 					select {
 					case dataChan <- processedEvent:

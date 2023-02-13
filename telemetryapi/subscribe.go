@@ -39,8 +39,8 @@ type SubscribeRequest struct {
 type SchemaVersion string
 
 const (
-	SchemaVersion20210318 = "2021-03-18"
-	SchemaVersionLatest   = SchemaVersion20210318
+	SchemaVersion20220701 = "2022-07-01"
+	SchemaVersionLatest   = SchemaVersion20220701
 )
 
 // BufferingCfg is the configuration set for receiving events from Telemetry API. Whichever of the conditions below is met first, the events will be sent

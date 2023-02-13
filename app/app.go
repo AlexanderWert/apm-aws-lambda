@@ -29,7 +29,7 @@ import (
 	"github.com/elastic/apm-aws-lambda/apmproxy"
 	"github.com/elastic/apm-aws-lambda/extension"
 	"github.com/elastic/apm-aws-lambda/logger"
-	"github.com/elastic/apm-aws-lambda/logsapi"
+	"github.com/elastic/apm-aws-lambda/telemetryapi"
 
 	"go.elastic.co/ecszap"
 	"go.uber.org/zap"
@@ -44,7 +44,7 @@ var (
 type App struct {
 	extensionName   string
 	extensionClient *extension.Client
-	logsClient      *logsapi.Client
+	telemetryClient *telemetryapi.Client
 	apmClient       *apmproxy.Client
 	logger          *zap.SugaredLogger
 	batch           *accumulator.Batch
@@ -77,30 +77,30 @@ func New(ctx context.Context, opts ...ConfigOption) (*App, error) {
 
 	app.extensionClient = extension.NewClient(c.awsLambdaRuntimeAPI, app.logger)
 
-	if !c.disableLogsAPI {
+	if !c.disableTelemetryAPI {
 		addr := "sandbox:0"
-		if c.logsapiAddr != "" {
-			addr = c.logsapiAddr
+		if c.telemetryapiAddr != "" {
+			addr = c.telemetryapiAddr
 		}
 
-		subscriptionLogStreams := []logsapi.SubscriptionType{logsapi.Platform}
-		if c.enableFunctionLogSubscription {
-			subscriptionLogStreams = append(subscriptionLogStreams, logsapi.Function)
+		subscriptionEventStreams := []telemetryapi.SubscriptionType{telemetryapi.Platform}
+		if c.enableFunctionTelemetrySubscription {
+			subscriptionEventStreams = append(subscriptionEventStreams, telemetryapi.Function)
 		}
 
-		lc, err := logsapi.NewClient(
-			logsapi.WithLogsAPIBaseURL(fmt.Sprintf("http://%s", c.awsLambdaRuntimeAPI)),
-			logsapi.WithListenerAddress(addr),
-			logsapi.WithLogBuffer(100),
-			logsapi.WithLogger(app.logger),
-			logsapi.WithSubscriptionTypes(subscriptionLogStreams...),
-			logsapi.WithInvocationLifecycler(app.batch),
+		tc, err := telemetryapi.NewClient(
+			telemetryapi.WithTelemetryAPIBaseURL(fmt.Sprintf("http://%s", c.awsLambdaRuntimeAPI)),
+			telemetryapi.WithListenerAddress(addr),
+			telemetryapi.WithLogBuffer(100),
+			telemetryapi.WithLogger(app.logger),
+			telemetryapi.WithSubscriptionTypes(subscriptionEventStreams...),
+			telemetryapi.WithInvocationLifecycler(app.batch),
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		app.logsClient = lc
+		app.telemetryClient = tc
 	}
 
 	var apmOpts []apmproxy.Option
