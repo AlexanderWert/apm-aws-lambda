@@ -81,7 +81,6 @@ func (tc *Client) ProcessEvents(
 			switch telEvent.Type {
 			case PlatformInitReport:
 				tc.invocationLifecycler.OnPlatformInitReport(telEvent.Record.RequestID, telEvent.Record.Metrics.DurationMs)
-				tc.logger.Infof("## PlatformInitReport processed successfully!")
 			case PlatformStart:
 				platformStartReqID = telEvent.Record.RequestID
 			case PlatformRuntimeDone:

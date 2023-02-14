@@ -26,24 +26,36 @@ import (
 	"go.elastic.co/fastjson"
 )
 
-type InitSpan struct {
+type LambdaSpan struct {
 	SpanData model.Span
 }
 
-func NewInitSpan(parentTxID model.SpanID, traceID model.TraceID, timestamp int64, duration float32) (*InitSpan, error) {
+const (
+	Init   string = "init"
+	Handle string = "handle"
+)
+
+func NewLambdaSpan(spanType string, parentTxID model.SpanID, traceID model.TraceID, timestamp int64, duration float32) (*LambdaSpan, error) {
 	var spanID model.SpanID
 	if _, err := cryptorand.Read(spanID[:]); err != nil {
 		return nil, fmt.Errorf("failed generating span ID for init span")
 	}
 
 	var sampleRate float64 = 1.0
+	baseName := "AWS Lambda "
+	subType := Init
+	name := baseName + "Initialize"
+	if spanType == Handle {
+		subType = Handle
+		name = baseName + "Handle"
+	}
 
 	initSpan := &model.Span{
-		Name:          "AWS Lambda Init",
+		Name:          name,
 		Timestamp:     model.Time(time.UnixMicro(timestamp)),
 		Duration:      float64(duration),
 		Type:          "awslambda",
-		Subtype:       "init",
+		Subtype:       subType,
 		ID:            spanID,
 		TransactionID: parentTxID,
 		TraceID:       traceID,
@@ -51,12 +63,12 @@ func NewInitSpan(parentTxID model.SpanID, traceID model.TraceID, timestamp int64
 		SampleRate:    &sampleRate,
 	}
 
-	return &InitSpan{
+	return &LambdaSpan{
 		SpanData: *initSpan,
 	}, nil
 }
 
-func (s *InitSpan) GetBytes() ([]byte, error) {
+func (s *LambdaSpan) GetBytes() ([]byte, error) {
 	var json fastjson.Writer
 	json.RawString(`{"span":`)
 	if err := s.SpanData.MarshalFastJSON(&json); err != nil {

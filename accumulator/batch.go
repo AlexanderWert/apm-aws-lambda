@@ -334,21 +334,22 @@ func (b *Batch) addData(data []byte, isTx bool) error {
 
 func (b *Batch) modelInitPhase(txData []byte) ([]byte, error) {
 	initDurationMs := b.coldstartDurationMs
-	tx, startTime, err := adjustTimestamp(txData, initDurationMs)
+	tx, startTime, handleStart, handleDuration, err := adjustTimestamp(txData, initDurationMs)
 	if err != nil {
 		return nil, err
 	}
 	b.coldstartDurationMs = -1.0
-	fmt.Printf("## Creating Span for init phase")
+
 	txID := &model.SpanID{}
 	txIDStr := fmt.Sprintf(`"%s"`, gjson.GetBytes(txData, "transaction.id").String())
-	fmt.Println("##")
-	fmt.Printf("## TransactionID String: %s", txIDStr)
 	txID.UnmarshalJSON([]byte(txIDStr))
+
 	traceId := &model.TraceID{}
 	traceIdStr := fmt.Sprintf(`"%s"`, gjson.GetBytes(txData, "transaction.trace_id").String())
 	traceId.UnmarshalJSON([]byte(traceIdStr))
-	initSpan, err := NewInitSpan(*txID, *traceId, startTime, initDurationMs)
+
+	// report init span
+	initSpan, err := NewLambdaSpan(Init, *txID, *traceId, startTime, initDurationMs)
 	if err != nil {
 		return nil, err
 	}
@@ -358,41 +359,46 @@ func (b *Batch) modelInitPhase(txData []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	debugData := string(initSpanData[:])
-	fmt.Printf("## Init Span data: %s", debugData)
-
 	b.addData(initSpanData, false)
+
+	// report handle span
+	handleSpan, err := NewLambdaSpan(Handle, *txID, *traceId, handleStart, handleDuration)
+	if err != nil {
+		return nil, err
+	}
+
+	handleSpanData, err := handleSpan.GetBytes()
+	if err != nil {
+		return nil, err
+	}
+
+	b.addData(handleSpanData, false)
 
 	return tx, nil
 }
 
-func adjustTimestamp(txData []byte, initDurationMs float32) ([]byte, int64, error) {
-	fmt.Printf("## adjusting timepstamp for request")
-
+func adjustTimestamp(txData []byte, initDurationMs float32) ([]byte, int64, int64, float32, error) {
 	oldTimestamp := gjson.GetBytes(txData, "transaction.timestamp").Int()
-	newTime := oldTimestamp - int64(initDurationMs*1000.0)
+	newTimestamp := oldTimestamp - int64(initDurationMs*1000.0)
 	oldDuration := float32(gjson.GetBytes(txData, "transaction.duration").Float())
 	newDuration := oldDuration + initDurationMs
 
-	fmt.Printf("## old timestamp: %d", oldTimestamp)
-	fmt.Printf("## setting new transaction timestamp: %d", newTime)
-
-	txn, err := sjson.SetBytes(txData, "transaction.timestamp", newTime)
+	txn, err := sjson.SetBytes(txData, "transaction.timestamp", newTimestamp)
 	if err != nil {
-		return nil, 0.0, err
+		return nil, 0, 0, 0.0, err
 	}
 
 	txn, err = sjson.SetBytes(txn, "transaction.duration", newDuration)
 	if err != nil {
-		return nil, 0.0, err
+		return nil, 0, 0, 0.0, err
 	}
 
 	txn, err = sjson.SetBytes(txn, "transaction.context.tags.aws_lambda_init_duration", initDurationMs)
 	if err != nil {
-		return nil, 0.0, err
+		return nil, 0, 0, 0.0, err
 	}
 
-	return txn, newTime, nil
+	return txn, newTimestamp, oldTimestamp, oldDuration, nil
 }
 
 func isTransactionEvent(body []byte) bool {
